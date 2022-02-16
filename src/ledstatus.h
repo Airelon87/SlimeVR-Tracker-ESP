@@ -20,12 +20,13 @@
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
     THE SOFTWARE.
 */
+#include "defines.h"
+#include "Arduino.h"
 
-// The OTA password is public, server should know it for OTA updates,
-// and devices don't have any authentification anyway.
-// We have password here to prevent random attacks on IOT things
-// that might try to hack all esp-based devices and upload malictious
-// firmware. We don't have any hardware buttons for the user to confirm
-// OTA update, so this is the best way we have.
-// OTA is allowed only for the first 60 seconds after device startup.
-const char* otaPassword = "SlimeVR-OTA"; // YOUR OTA PASSWORD HERE, LEAVE EMPTY TO DISABLE OTA UPDATES
+#define LED_STATUS_SERVER_CONNECTING 2
+#define LED_STATUS_WIFI_CONNECTING 4
+#define LED_STATUS_IMU_ERROR 256
+
+void setLedStatus(uint32_t status);
+void unsetLedStatus(uint32_t status);
+void ledStatusUpdate();

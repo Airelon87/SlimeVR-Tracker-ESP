@@ -21,11 +21,11 @@
     THE SOFTWARE.
 */
 
-#ifndef SLIMEVR_CONFIG_H_
-#define SLIMEVR_CONFIG_H_
+#ifndef _OWO_CONFIG_H_
+#define _OWO_CONFIG_H_
 
 struct CalibrationConfig {
-    //accel offsets and correction matrix
+    //acel offsets and correction matrix
     float A_B[3];
     float A_Ainv[3][3];
     // mag offsets and correction matrix
@@ -33,12 +33,10 @@ struct CalibrationConfig {
     float M_Ainv[3][3];
     //raw offsets, determined for gyro at rest
     float G_off[3];
-    // calibration temperature for dynamic compensation
-    float temperature;
 };
 
 struct DeviceConfig {
-    CalibrationConfig calibration[2];
+    CalibrationConfig calibration;
     int deviceId;
     int deviceMode;
 };
@@ -47,4 +45,4 @@ DeviceConfig * const getConfigPtr();
 void setConfig(const DeviceConfig & config);
 void saveConfig();
 
-#endif // SLIMEVR_CONFIG_H_
+#endif // _OWO_CONFIG_H_

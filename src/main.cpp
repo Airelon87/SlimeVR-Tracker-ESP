@@ -23,106 +23,169 @@
 
 #include "Wire.h"
 #include "ota.h"
-#include "sensors/sensorfactory.h"
+#include "sensor.h"
 #include "configuration.h"
-#include "network/network.h"
-#include "globals.h"
+#include "wifihandler.h"
+#include "udpclient.h"
+#include "defines.h"
 #include "credentials.h"
 #include <i2cscan.h>
-#include "serial/serialcommands.h"
-#include "ledmgr.h"
-#include "batterymonitor.h"
+#include "serialcommands.h"
+#include "ledstatus.h"
 
-SensorFactory sensors {};
-int sensorToCalibrate = -1;
+#if IMU == IMU_BNO080 || IMU == IMU_BNO085
+    BNO080Sensor sensor{};
+    #if defined(PIN_IMU_INT_2)
+        #define HAS_SECOND_IMU true
+        BNO080Sensor sensor2{};
+    #endif
+#elif IMU == IMU_BNO055
+    BNO055Sensor sensor{};
+#elif IMU == IMU_MPU9250
+    MPU9250Sensor sensor{};
+#elif IMU == IMU_MPU6500 || IMU == IMU_MPU6050
+    MPU6050Sensor sensor{};
+    #define HAS_SECOND_IMU true
+    MPU6050Sensor sensor2{};
+#else
+    #error Unsupported IMU
+#endif
+#ifndef HAS_SECOND_IMU
+    EmptySensor sensor2{};
+#endif
+
+bool isCalibrating = false;
 bool blinking = false;
 unsigned long blinkStart = 0;
-unsigned long loopTime = 0;
+unsigned long now_ms, last_ms = 0; //millis() timers
+unsigned long last_battery_sample = 0;
 bool secondImuActive = false;
-BatteryMonitor battery;
+
+void commandRecieved(int command, void * const commandData, int commandDataLength)
+{
+    switch (command)
+    {
+    case COMMAND_CALLIBRATE:
+        isCalibrating = true;
+        break;
+    case COMMAND_SEND_CONFIG:
+        sendConfig(getConfigPtr(), PACKET_CONFIG);
+        break;
+    case COMMAND_BLINK:
+        blinking = true;
+        blinkStart = now_ms;
+        break;
+    }
+}
 
 void setup()
 {
     //wifi_set_sleep_type(NONE_SLEEP_T);
     // Glow diode while loading
-#if ENABLE_LEDS
     pinMode(LOADING_LED, OUTPUT);
     pinMode(CALIBRATING_LED, OUTPUT);
-    LEDManager::off(CALIBRATING_LED);
-    LEDManager::on(LOADING_LED);
-#endif
-
+    digitalWrite(CALIBRATING_LED, HIGH);
+    digitalWrite(LOADING_LED, LOW);
+    
     Serial.begin(serialBaudRate);
-    SerialCommands::setUp();
-    Serial.println();
-    Serial.println();
-    Serial.println();
+    setUpSerialCommands();
 #if IMU == IMU_MPU6500 || IMU == IMU_MPU6050 || IMU == IMU_MPU9250
-    I2CSCAN::clearBus(PIN_IMU_SDA, PIN_IMU_SCL); // Make sure the bus isn't stuck when resetting ESP without powering it down
+    I2CSCAN::clearBus(PIN_IMU_SDA, PIN_IMU_SCL); // Make sure the bus isn't suck when reseting ESP without powering it down
     // Do it only for MPU, cause reaction of BNO to this is not investigated yet
 #endif
     // join I2C bus
     Wire.begin(PIN_IMU_SDA, PIN_IMU_SCL);
 #ifdef ESP8266
-    Wire.setClockStretchLimit(150000L); // Default stretch limit 150mS
+    Wire.setClockStretchLimit(150000L); // Default streatch limit 150mS
 #endif
     Wire.setClock(I2C_SPEED);
 
     getConfigPtr();
+    setConfigRecievedCallback(setConfig);
+    setCommandRecievedCallback(commandRecieved);
     // Wait for IMU to boot
     delay(500);
     
-    sensors.create();
-    sensors.motionSetup();
-    
-    Network::setUp();
-    OTA::otaSetup(otaPassword);
-    battery.Setup();
-    LEDManager::off(LOADING_LED);
-    loopTime = micros();
+    // Currently only second BNO08X is supported
+#if IMU == IMU_BNO080 || IMU == IMU_BNO085
+    #ifdef HAS_SECOND_IMU
+        uint8_t first = I2CSCAN::pickDevice(BNO_ADDR_1, BNO_ADDR_2, true);
+        uint8_t second = I2CSCAN::pickDevice(BNO_ADDR_2, BNO_ADDR_1, false);
+        if(first != second) {
+            sensor.setupBNO080(0, first, PIN_IMU_INT);
+            sensor2.setupBNO080(1, second, PIN_IMU_INT_2);
+            secondImuActive = true;
+        } else {
+            sensor.setupBNO080(0, first, PIN_IMU_INT);
+        }
+    #else
+    sensor.setupBNO080(0, I2CSCAN::pickDevice(BNO_ADDR_1, BNO_ADDR_2, true), PIN_IMU_INT);
+    #endif
+#endif
+#if IMU == IMU_MPU6050 || IMU == IMU_MPU6500
+    #ifdef HAS_SECOND_IMU
+        uint8_t first = I2CSCAN::pickDevice(0x68, 0x69, true);
+        uint8_t second = I2CSCAN::pickDevice(0x69, 0x68, false);
+        if(first != second) {
+            sensor2.setSecond();
+            secondImuActive = true;
+        }
+    #endif
+#endif
+
+    sensor.motionSetup();
+#ifdef HAS_SECOND_IMU
+    if(secondImuActive)
+        sensor2.motionSetup();
+#endif
+
+    setUpWiFi();
+    otaSetup(otaPassword);
+    digitalWrite(LOADING_LED, HIGH);
 }
+
+// AHRS loop
 
 void loop()
 {
-    LEDManager::ledStatusUpdate();
-    SerialCommands::update();
-    OTA::otaUpdate();
-    Network::update(sensors.getFirst(), sensors.getSecond());
-#ifndef UPDATE_IMU_UNCONNECTED
-    if (ServerConnection::isConnected())
+    ledStatusUpdate();
+    serialCommandsUpdate();
+    wifiUpkeep();
+    otaUpdate();
+    clientUpdate(&sensor, &sensor2);
+    if (isCalibrating)
     {
-#endif
-        sensors.motionLoop();
-#ifndef UPDATE_IMU_UNCONNECTED
+        sensor.startCalibration(0);
+        //sensor2.startCalibration(0);
+        isCalibrating = false;
     }
+#ifndef UPDATE_IMU_UNCONNECTED
+        if(isConnected()) {
+#endif
+    sensor.motionLoop();
+#ifdef HAS_SECOND_IMU
+    sensor2.motionLoop();
+#endif
+#ifndef UPDATE_IMU_UNCONNECTED
+        }
 #endif
     // Send updates
+    now_ms = millis();
 #ifndef SEND_UPDATES_UNCONNECTED
-    if (ServerConnection::isConnected())
-    {
+    if(isConnected()) {
 #endif
-        sensors.sendData();
+        sensor.sendData();
+#ifdef HAS_SECOND_IMU
+        sensor2.sendData();
+#endif
 #ifndef SEND_UPDATES_UNCONNECTED
     }
 #endif
-    battery.Loop();
-
-#ifdef TARGET_LOOPTIME_MICROS
-    long elapsed = (micros() - loopTime);
-    if (elapsed < TARGET_LOOPTIME_MICROS)
-    {
-        long sleepus = TARGET_LOOPTIME_MICROS - elapsed - 100;//µs to sleep
-        long sleepms = sleepus / 1000;//ms to sleep
-        if(sleepms > 0) // if >= 1 ms
-        {
-            delay(sleepms); // sleep ms = save power
-            sleepus -= sleepms * 1000;
-        }
-        if (sleepus > 100)
-        {
-            delayMicroseconds(sleepus);
-        }
+#ifdef PIN_BATTERY_LEVEL
+    if(now_ms - last_battery_sample >= batterySampleRate) {
+        last_battery_sample = now_ms;
+        float battery = ((float) analogRead(PIN_BATTERY_LEVEL)) * batteryADCMultiplier;
+        sendFloat(battery, PACKET_BATTERY_LEVEL);
     }
-    loopTime = micros();
 #endif
 }
